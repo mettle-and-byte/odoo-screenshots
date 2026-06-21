@@ -1,0 +1,202 @@
+name: Screenshots (reusable)
+
+# Reusable workflow that spins up Postgres + Odoo, installs an addon with demo
+# data, runs an optional seed script to create the exact state we want to show,
+# then drives a module-supplied Playwright script to capture screenshots. The
+# PNGs are always uploaded as an artifact; with commit: true they are also
+# committed back into the module repo (default static/description/screenshots).
+#
+# Everything here is generic. The only per-module parts live in the calling
+# repo: screenshots/capture.mjs (required) and screenshots/seed.py (optional).
+#
+# Call it from a module repo with a thin workflow_dispatch wrapper, e.g.:
+#
+#   jobs:
+#     shots:
+#       uses: mettle-and-byte/odoo-screenshots/.github/workflows/screenshots.yml@main
+#       permissions:
+#         contents: write
+#       with:
+#         module_name: my_addon
+#         commit: ${{ inputs.commit }}
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      module_name:
+        description: "Addon directory name (must match the module's folder)."
+        required: true
+        type: string
+      odoo_version:
+        description: "Odoo image tag, e.g. 17.0. Empty = read it from __manifest__.py."
+        required: false
+        type: string
+        default: ""
+      script_path:
+        description: "Playwright capture script, relative to the module repo root."
+        required: false
+        type: string
+        default: "screenshots/capture.mjs"
+      seed_path:
+        description: "Optional Odoo-shell seed script. Skipped if the file is absent."
+        required: false
+        type: string
+        default: "screenshots/seed.py"
+      extra_install:
+        description: "Extra modules to install alongside (comma separated)."
+        required: false
+        type: string
+        default: ""
+      commit:
+        description: "Commit the PNGs back into the module repo instead of artifact-only."
+        required: false
+        type: boolean
+        default: false
+      commit_path:
+        description: "Where committed PNGs land in the module repo."
+        required: false
+        type: string
+        default: "static/description/screenshots"
+      ci_ref:
+        description: "Ref of odoo-screenshots to pull the shared compose file from."
+        required: false
+        type: string
+        default: "main"
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout module repo
+        uses: actions/checkout@v4
+        with:
+          path: module
+
+      - name: Checkout shared CI assets
+        uses: actions/checkout@v4
+        with:
+          repository: mettle-and-byte/odoo-screenshots
+          ref: ${{ inputs.ci_ref }}
+          path: ci
+
+      - name: Resolve Odoo version
+        id: ver
+        run: |
+          set -euo pipefail
+          V="${{ inputs.odoo_version }}"
+          if [ -z "$V" ]; then
+            V=$(grep -oE "['\"]version['\"][^0-9]*([0-9]+\.[0-9]+)" "module/__manifest__.py" | grep -oE "[0-9]+\.[0-9]+" | head -1)
+          fi
+          if [ -z "$V" ]; then echo "Could not resolve Odoo version" >&2; exit 1; fi
+          echo "odoo_version=$V" >> "$GITHUB_OUTPUT"
+          echo "Using Odoo $V"
+
+      - name: Start Postgres + Odoo
+        env:
+          ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
+          MODULE_NAME: ${{ inputs.module_name }}
+          MODULE_PATH: ${{ github.workspace }}/module
+        run: |
+          set -euo pipefail
+          cd ci/local
+          docker compose up -d db
+          # Wait for Postgres to accept connections.
+          for i in $(seq 1 30); do
+            if docker compose exec -T db pg_isready -U odoo >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+
+      - name: Install module (+ demo data) and seed
+        env:
+          ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
+          MODULE_NAME: ${{ inputs.module_name }}
+          MODULE_PATH: ${{ github.workspace }}/module
+        run: |
+          set -euo pipefail
+          cd ci/local
+          INSTALL="${MODULE_NAME}"
+          if [ -n "${{ inputs.extra_install }}" ]; then INSTALL="${INSTALL},${{ inputs.extra_install }}"; fi
+          echo "Installing: $INSTALL"
+          docker compose run --rm odoo \
+            odoo -d screenshots -i "$INSTALL" --stop-after-init --log-level=warn
+          SEED="${{ github.workspace }}/module/${{ inputs.seed_path }}"
+          if [ -f "$SEED" ]; then
+            echo "Seeding from ${{ inputs.seed_path }}"
+            docker compose run --rm -T odoo \
+              odoo shell -d screenshots --no-http --log-level=warn < "$SEED"
+          else
+            echo "No seed script at ${{ inputs.seed_path }}, skipping."
+          fi
+
+      - name: Start Odoo HTTP server
+        env:
+          ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
+          MODULE_NAME: ${{ inputs.module_name }}
+          MODULE_PATH: ${{ github.workspace }}/module
+        run: |
+          set -euo pipefail
+          cd ci/local
+          docker compose up -d odoo
+          # Wait for the web server to answer.
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8069/web/login >/dev/null 2>&1; then
+              echo "Odoo is up"; break
+            fi
+            sleep 2
+            if [ "$i" = "60" ]; then echo "Odoo did not come up" >&2; docker compose logs odoo | tail -50; exit 1; fi
+          done
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        run: |
+          set -euo pipefail
+          npm init -y >/dev/null 2>&1 || true
+          npm install playwright@1.49.0
+          npx playwright install --with-deps chromium
+
+      - name: Capture screenshots
+        env:
+          BASE_URL: http://localhost:8069
+          OUT_DIR: ${{ github.workspace }}/shots
+          MODULE_NAME: ${{ inputs.module_name }}
+          ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          node "module/${{ inputs.script_path }}"
+
+      - name: Dump Odoo logs on failure
+        if: failure()
+        run: |
+          cd ci/local && docker compose logs odoo | tail -120 || true
+
+      - name: Upload screenshots artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ inputs.module_name }}-${{ steps.ver.outputs.odoo_version }}
+          path: shots/
+          if-no-files-found: warn
+
+      - name: Commit screenshots into the module repo
+        if: ${{ inputs.commit && success() }}
+        run: |
+          set -euo pipefail
+          DEST="module/${{ inputs.commit_path }}"
+          mkdir -p "$DEST"
+          cp -f shots/*.png "$DEST"/ 2>/dev/null || { echo "No PNGs to commit"; exit 0; }
+          cd module
+          git config user.name "mnb-screenshots-bot"
+          git config user.email "support@mnb.ltd"
+          git add "${{ inputs.commit_path }}"
+          if git diff --cached --quiet; then
+            echo "No screenshot changes to commit."
+          else
+            git commit -m "screenshots: refresh ${{ inputs.module_name }} (Odoo ${{ steps.ver.outputs.odoo_version }})"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi

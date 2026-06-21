@@ -1,0 +1,32 @@
+# Shared by the CI workflow and by local iteration (run-local.sh).
+# Drive it with env vars:
+#   ODOO_VERSION  Odoo image tag (default 17.0)
+#   MODULE_NAME   addon directory name, mounted into the addons path
+#   MODULE_PATH   absolute path to the module repo root on the host
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "odoo"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  odoo:
+    image: odoo:${ODOO_VERSION:-17.0}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8069:8069"
+    environment:
+      HOST: db
+      PORT: "5432"
+      USER: odoo
+      PASSWORD: odoo
+    volumes:
+      - ${MODULE_PATH:-../..}:/mnt/extra-addons/${MODULE_NAME:?set MODULE_NAME}:ro
