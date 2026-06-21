@@ -172,6 +172,10 @@ jobs:
 
       - name: Dump Odoo logs on failure
         if: failure()
+        env:
+          ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
+          MODULE_NAME: ${{ inputs.module_name }}
+          MODULE_PATH: ${{ github.workspace }}/module
         run: |
           cd ci/local && docker compose logs odoo | tail -120 || true
 
