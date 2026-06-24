@@ -28,6 +28,11 @@ on:
         description: "Addon directory name (must match the module's folder)."
         required: true
         type: string
+      module_subdir:
+        description: "Subdirectory holding the module, relative to the repo root. Empty = module is at the repo root."
+        required: false
+        type: string
+        default: ""
       odoo_version:
         description: "Odoo image tag, e.g. 17.0. Empty = read it from __manifest__.py."
         required: false
@@ -86,7 +91,7 @@ jobs:
           set -euo pipefail
           V="${{ inputs.odoo_version }}"
           if [ -z "$V" ]; then
-            V=$(grep -oE "['\"]version['\"][^0-9]*([0-9]+\.[0-9]+)" "module/__manifest__.py" | grep -oE "[0-9]+\.[0-9]+" | head -1)
+            V=$(grep -oE "['\"]version['\"][^0-9]*([0-9]+\.[0-9]+)" "module/${{ inputs.module_subdir }}/__manifest__.py" | grep -oE "[0-9]+\.[0-9]+" | head -1)
           fi
           if [ -z "$V" ]; then echo "Could not resolve Odoo version" >&2; exit 1; fi
           echo "odoo_version=$V" >> "$GITHUB_OUTPUT"
@@ -96,7 +101,7 @@ jobs:
         env:
           ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
           MODULE_NAME: ${{ inputs.module_name }}
-          MODULE_PATH: ${{ github.workspace }}/module
+          MODULE_PATH: ${{ github.workspace }}/module/${{ inputs.module_subdir }}
         run: |
           set -euo pipefail
           cd ci/local
@@ -111,7 +116,7 @@ jobs:
         env:
           ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
           MODULE_NAME: ${{ inputs.module_name }}
-          MODULE_PATH: ${{ github.workspace }}/module
+          MODULE_PATH: ${{ github.workspace }}/module/${{ inputs.module_subdir }}
         run: |
           set -euo pipefail
           cd ci/local
@@ -133,7 +138,7 @@ jobs:
         env:
           ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
           MODULE_NAME: ${{ inputs.module_name }}
-          MODULE_PATH: ${{ github.workspace }}/module
+          MODULE_PATH: ${{ github.workspace }}/module/${{ inputs.module_subdir }}
         run: |
           set -euo pipefail
           cd ci/local
@@ -175,7 +180,7 @@ jobs:
         env:
           ODOO_VERSION: ${{ steps.ver.outputs.odoo_version }}
           MODULE_NAME: ${{ inputs.module_name }}
-          MODULE_PATH: ${{ github.workspace }}/module
+          MODULE_PATH: ${{ github.workspace }}/module/${{ inputs.module_subdir }}
         run: |
           cd ci/local && docker compose logs odoo | tail -120 || true
 
